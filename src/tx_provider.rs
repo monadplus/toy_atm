@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use csv::Trim;
 use log::info;
 use std::fmt::Debug;
+use std::future::Future;
 use std::path::Path;
 
 use crate::tx::Tx;
@@ -23,10 +24,11 @@ impl TxProvider {
     }
 
     /// Given the filepath of a CSV, executes the given function for each line.
-    pub fn with_csv<P, F>(&self, path: P, process_tx: F) -> any::Result<()>
+    pub async fn with_csv<P, F, Fut>(&self, path: P, process_tx: F) -> any::Result<()>
     where
         P: AsRef<Path> + Debug,
-        F: Fn(Tx) -> any::Result<()>,
+        F: Fn(Tx) -> Fut,
+        Fut: Future<Output = any::Result<()>>,
     {
         let mut csv_reader = csv::ReaderBuilder::new()
             .trim(Trim::All)
@@ -36,8 +38,8 @@ impl TxProvider {
         info!("CSV reader initialized for path {:?}", &path);
 
         for row in csv_reader.deserialize() {
-            let tx: Tx = row?;
-            process_tx(tx)?;
+            let trans: Tx = row?;
+            process_tx(trans).await?;
         }
 
         Ok(())
@@ -61,24 +63,28 @@ mod tests {
         root
     }
 
-    fn generic_csv_test(file_name: impl AsRef<Path>, expected: Vec<Tx>) {
+    async fn generic_csv_test(file_name: impl AsRef<Path>, expected: Vec<Tx>) {
         let csv_path = get_resource(file_name);
         let tx_provider = TxProvider::new();
-        let accum_tx: Arc<Mutex<Vec<Tx>>> = Arc::new(Mutex::new(vec![]));
+        let accum: Arc<Mutex<Vec<Tx>>> = Arc::new(Mutex::new(vec![]));
+        let accum_clone = Arc::clone(&accum);
         tx_provider
             .with_csv(csv_path, {
-                let accum_tx = Arc::clone(&accum_tx);
-                move |tx| {
-                    accum_tx.lock().unwrap().push(tx);
-                    Ok(())
+                |trans| {
+                    let accum = Arc::clone(&accum_clone);
+                    async move {
+                        accum.lock().unwrap().push(trans);
+                        Ok(())
+                    }
                 }
             })
+            .await
             .unwrap();
-        assert_eq!(*accum_tx.lock().unwrap(), expected);
+        assert_eq!(*accum.lock().unwrap(), expected);
     }
 
-    #[test]
-    fn from_csv_small_test() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_csv_small_test() {
         let expected = vec![
             tx!(+, 1, 1, 100),
             tx!(-, 1, 2, 20),
@@ -89,11 +95,11 @@ mod tests {
             tx!(!, 2, 3),
             tx!(ko, 2, 3),
         ];
-        generic_csv_test("small.csv", expected);
+        generic_csv_test("small.csv", expected).await;
     }
 
-    #[test]
-    fn from_csv_small_trailing_test() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_csv_small_trailing_test() {
         let expected = vec![
             tx!(+, 1, 1, 100),
             tx!(-, 1, 2, 20),
@@ -104,11 +110,11 @@ mod tests {
             tx!(!, 2, 3),
             tx!(ko, 2, 3),
         ];
-        generic_csv_test("small_trailing_commas.csv", expected);
+        generic_csv_test("small_trailing_commas.csv", expected).await;
     }
 
-    #[test]
-    fn from_csv_small_ws_test() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_csv_small_ws_test() {
         let expected = vec![
             tx!(+, 1, 1, 100),
             tx!(-, 1, 2, 20),
@@ -119,6 +125,6 @@ mod tests {
             tx!(!, 2, 3),
             tx!(ko, 2, 3),
         ];
-        generic_csv_test("small_ws.csv", expected);
+        generic_csv_test("small_ws.csv", expected).await;
     }
 }

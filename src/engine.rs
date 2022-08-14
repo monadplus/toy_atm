@@ -1,18 +1,20 @@
 //! This module contains the transaction engine.
 
 #![allow(clippy::new_without_default)]
-use std::{
-    collections::HashMap,
-    sync::mpsc::{self, Receiver, Sender},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     report::{AccountSummary, Report},
     tx::{ClientID, Tx, TxID},
 };
 use anyhow as any;
+use anyhow::anyhow;
 use log::{error, info, trace, warn};
 use rust_decimal::Decimal;
+use tokio::{
+    sync::{mpsc, oneshot, Mutex},
+    task,
+};
 
 /* TODO
 accounts: RwLock<ClientID, RwLock<(Account, pending: Vec<Tx>)>>
@@ -26,6 +28,34 @@ pending: RwLock<HashSet<ClientID>
   2.1. clientID <- Pop the first pending
   2.2. RwLock<(account, pending)> <- Retrieves the account(clientID)
   2.3. account.process_tx(pending)
+
+
+    Example of loop until channel is dropped
+
+    tokio::select! {
+        _ = async {
+            loop {
+                let (socket, _) = listener.accept().await?;
+                tokio::spawn(async move { process(socket) });
+            }
+            Ok::<_, io::Error>(())
+        } => {}
+        _ = rx => {
+            println!("terminating accept loop");
+        }
+    }
+
+    tokio::select! {
+        Some(v) = rx1.recv() => {
+            println!("Got {:?} from rx1", v);
+        }
+        Some(v) = rx2.recv() => {
+            println!("Got {:?} from rx2", v);
+        }
+        else => {
+            println!("Both channels closed");
+        }
+    }
 */
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,58 +200,89 @@ impl Account {
     }
 }
 
-/// Wrapper for [Sender<Tx>].
-/// Use this to communicate with the [Engine].
-/// Don't forget to call [EngineTx::finish] when you wish to stop the engine.
-pub struct EngineTx(Sender<Tx>);
-
-impl EngineTx {
-    pub fn send_tx(&self, tx: Tx) -> any::Result<()> {
-        Ok(self.0.send(tx)?)
-    }
-
-    /// Drops the sender when the processing is finished.
-    pub fn finish(self) {}
-}
+type Accounts = Arc<Mutex<HashMap<ClientID, Account>>>;
 
 /// The transaction engine.
 pub struct Engine {
-    rx: Receiver<Tx>,
-    accounts: HashMap<ClientID, Account>,
+    trans_tx: Option<mpsc::Sender<Tx>>,
+    shut_rx: Option<oneshot::Receiver<()>>,
+    accounts: Accounts,
 }
 
 impl Engine {
-    pub fn new() -> (EngineTx, Engine) {
-        let (tx, rx) = mpsc::channel();
-        let sink = EngineTx(tx);
-        let engine = Engine {
-            rx,
-            accounts: HashMap::new(),
-        };
-        (sink, engine)
+    pub async fn run() -> Engine {
+        let (trans_tx, trans_rx) = mpsc::channel(10);
+        let (shut_tx, shut_rx) = oneshot::channel();
+        let accounts = Arc::new(Mutex::new(HashMap::new()));
+        let accounts_ptr = Arc::clone(&accounts);
+
+        task::spawn(async move { engine_logic::main(trans_rx, shut_tx, accounts_ptr).await });
+
+        Engine {
+            accounts,
+            trans_tx: Some(trans_tx),
+            shut_rx: Some(shut_rx),
+        }
     }
 
-    pub fn start(&mut self) -> any::Result<Report> {
-        while let Ok(unprocessed_tx) = self.rx.recv() {
-            trace!("Processing transaction {unprocessed_tx:?}");
-            self.process_tx(unprocessed_tx)
+    pub async fn send_trans(&self, trans: Tx) -> any::Result<()> {
+        match self.trans_tx {
+            None => Err(anyhow!("Sender dropped")),
+            Some(ref tx) => Ok(tx.send(trans).await?),
+        }
+    }
+
+    pub async fn finish(&mut self) {
+        // Drops the sender to finish the `engine_logic::main`
+        if let None = self.trans_tx.take() {
+            error!("finish called multiple times");
         }
 
-        Ok(Report::new(&self.accounts))
+        // Wait until messages are processed
+        if let Some(shut_tx) = self.shut_rx.take() {
+            if let Err(_) = shut_tx.await {
+                error!("shut_rx dropped before receiving the stop signal")
+            }
+        }
     }
 
-    pub fn process_tx(&mut self, tx: Tx) {
-        let client_id = tx.client_id();
-        match self.accounts.get_mut(&client_id) {
-            None => {
-                let mut account = Account::new();
-                account.process_tx(tx);
-                self.accounts.insert(client_id, account);
-                info!("New account created for client {client_id:?}");
-            }
-            Some(account) => {
-                account.process_tx(tx);
-            }
+    pub async fn report(&self) -> Report {
+        let accounts = {
+            let lock = self.accounts.lock().await;
+            lock.clone() // Cloning to release the lock fast
+        };
+        Report::new(&accounts)
+    }
+}
+
+mod engine_logic {
+    use super::*;
+
+    pub async fn main(
+        mut rx: mpsc::Receiver<Tx>,
+        shut_tx: oneshot::Sender<()>,
+        accounts: Accounts,
+    ) {
+        while let Some(tx) = rx.recv().await {
+            trace!("Processing transaction {tx:?}");
+            let client_id = tx.client_id();
+            let mut accounts_lock = accounts.lock().await;
+            // Careful, holding the lock
+            match accounts_lock.get_mut(&client_id) {
+                None => {
+                    let mut account = Account::new();
+                    account.process_tx(tx);
+                    accounts_lock.insert(client_id, account);
+                    info!("New account created for client {client_id:?}");
+                }
+                Some(account) => {
+                    account.process_tx(tx);
+                }
+            };
+        }
+
+        if let Err(_) = shut_tx.send(()) {
+            error!("shut_rx dropped before sending the stop signal")
         };
     }
 }
@@ -476,28 +537,32 @@ mod tests {
         assert_eq!(expected, account);
     }
 
-    #[test]
-    fn engine_test() {
-        let (engine_tx, mut engine) = Engine::new();
-        // Client 1
-        engine_tx.send_tx(tx!(+,1,1,100)).unwrap();
-        engine_tx.send_tx(tx!(+,1,2,50)).unwrap();
-        engine_tx.send_tx(tx!(-,1,3,30)).unwrap();
-        engine_tx.send_tx(tx!(!, 1, 1)).unwrap();
-        engine_tx.send_tx(tx!(!, 1, 2)).unwrap();
-        engine_tx.send_tx(tx!(!, 1, 2)).unwrap();
-        engine_tx.send_tx(tx!(ok, 1, 1)).unwrap();
-        engine_tx.send_tx(tx!(ko, 1, 2)).unwrap();
-        engine_tx.send_tx(tx!(+,1,4,100)).unwrap();
-        // Client 2
-        engine_tx.send_tx(tx!(+,2,5,100)).unwrap();
-        engine_tx.send_tx(tx!(+,2,6,100)).unwrap();
-        engine_tx.send_tx(tx!(-,2,7,30)).unwrap();
-        engine_tx.send_tx(tx!(!, 2, 5)).unwrap();
-        engine_tx.send_tx(tx!(!, 2, 7)).unwrap();
-        engine_tx.finish();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn engine_test() {
+        // Run: `$ cargo test engine_test -- --nocapture`
+        //
+        // Uncomment for debugging:
+        // env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
 
-        let report = engine.start().unwrap();
+        let mut engine = Engine::run().await;
+        // Client 1
+        engine.send_trans(tx!(+,1,1,100)).await.unwrap();
+        engine.send_trans(tx!(+,1,2,50)).await.unwrap();
+        engine.send_trans(tx!(-,1,3,30)).await.unwrap();
+        engine.send_trans(tx!(!, 1, 1)).await.unwrap();
+        engine.send_trans(tx!(!, 1, 2)).await.unwrap();
+        engine.send_trans(tx!(!, 1, 2)).await.unwrap();
+        engine.send_trans(tx!(ok, 1, 1)).await.unwrap();
+        engine.send_trans(tx!(ko, 1, 2)).await.unwrap();
+        engine.send_trans(tx!(+,1,4,100)).await.unwrap();
+        // Client 2
+        engine.send_trans(tx!(+,2,5,100)).await.unwrap();
+        engine.send_trans(tx!(+,2,6,100)).await.unwrap();
+        engine.send_trans(tx!(-,2,7,30)).await.unwrap();
+        engine.send_trans(tx!(!, 2, 5)).await.unwrap();
+        engine.finish().await;
+
+        let report = engine.report().await;
         let expected = Report(vec![
             AccountSummary {
                 client_id: ClientID(1),

@@ -79,4 +79,5 @@ For example, the producer and the consumer of the transactions have been split u
 ## TODOs
 
 - [ ] Add concurrency
+  - [ ] Test do not pass because `report()` doesn't wait for all transactions to be processed.
 - [ ] Profile, benchmark and improve performance

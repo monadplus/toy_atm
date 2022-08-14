@@ -20,20 +20,28 @@ use toy_atm::tx_provider::TxProvider;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> any::Result<()> {
+    // Set up the logging
     env_logger::Builder::from_env(Env::default().default_filter_or("error")).init();
 
+    // Parse the CSV
     let csv_file_path = match env::args().nth(1) {
         None => Err(anyhow!("Expecting one argument")),
         Some(file_path) => Ok(file_path),
     }?;
 
-    let (engine_tx, mut engine) = Engine::new();
+    // Start the engine to process asynchronous transactions on the background.
+    let mut engine = Engine::run().await;
 
     let tx_provider = TxProvider::new();
-    tx_provider.with_csv(&csv_file_path, |tx| engine_tx.send_tx(tx))?;
-    engine_tx.finish();
+    // Streamly process all transactions from the CSV
+    tx_provider
+        .with_csv(&csv_file_path, |trans| engine.send_trans(trans))
+        .await?;
 
-    let report = engine.start()?;
+    // Await until all transactions have been processed
+    engine.finish().await;
+
+    let report = engine.report().await;
     print!("{}", report.pretty_csv());
 
     Ok(())
