@@ -18,7 +18,8 @@ use std::env;
 use toy_atm::engine::Engine;
 use toy_atm::tx_provider::TxProvider;
 
-fn main() -> any::Result<()> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> any::Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("error")).init();
 
     let csv_file_path = match env::args().nth(1) {
