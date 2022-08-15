@@ -224,13 +224,13 @@ impl Engine {
 
     pub async fn finish(&mut self) {
         // Drops the sender to finish the `engine_logic::main`
-        if let None = self.trans_tx.take() {
+        if self.trans_tx.take().is_none() {
             error!("finish called multiple times");
         }
 
         // Wait until messages are processed
         if let Some(shut_tx) = self.shut_rx.take() {
-            if let Err(_) = shut_tx.await {
+            if shut_tx.await.is_err() {
                 error!("shut_rx dropped before receiving the stop signal")
             }
         }
@@ -313,16 +313,16 @@ mod engine_logic {
 
         // Wait for all workers to finish
         for tx in in_txs.into_iter() {
-            if let Err(_) = tx.send(()) {
+            if tx.send(()).is_err() {
                 error!("Sender stop signal for worker failed")
             }
         }
-        if let Err(_) = try_join_all(out_rxs).await {
+        if try_join_all(out_rxs).await.is_err() {
             error!("Receiver shutdown for worker failed")
         }
 
         // Send shutdown signal
-        if let Err(_) = shutdown_tx.send(()) {
+        if shutdown_tx.send(()).is_err() {
             error!("shut_rx dropped before sending the stop signal")
         };
     }
@@ -379,7 +379,7 @@ mod engine_logic {
                 }
             }
         }
-        if let Err(_) = shutdown_tx.send(()) {
+        if shutdown_tx.send(()).is_err() {
             error!("Worker shutdown receiver dropped before a message was sent");
         }
     }
