@@ -28,6 +28,13 @@ client,available,held,total,locked
 1,100.0,20.0,120.0,false
 ```
 
+## Versions
+
+This project has been progressively built from simple to complex:
+- [Version 0.1](https://github.com/monadplus/toy_atm/tree/v0.1/sequential): single process
+- [Version 0.2](https://github.com/monadplus/toy_atm/tree/v0.2/multithreading): multithreading
+- [Version 1.0 (current)](https://github.com/monadplus/toy_atm): multithreading with less contingency
+
 ## Compile
 
 ```sh
@@ -82,4 +89,5 @@ The CSV is processed line by line without loading the whole file into memory.
   - The Accounts will be sharded by worker to only lock the shard of the worker
   - Inside each worker, the processing of the transactions will be sequential.
 
+- [ ] Version 0.2 has a race condition on the test `engine_test` hard to reproduce.
 - [ ] Profile, benchmark and improve performance
