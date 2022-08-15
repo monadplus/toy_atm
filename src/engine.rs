@@ -178,7 +178,7 @@ pub struct Engine {
 
 impl Engine {
     pub async fn run(n_workers: u8) -> Engine {
-        let (trans_tx, trans_rx) = mpsc::channel(10);
+        let (trans_tx, trans_rx) = mpsc::channel(1000);
         let (shut_tx, shut_rx) = oneshot::channel();
         let accounts: Accounts = Arc::new(RwLock::new(HashMap::new()));
 
@@ -245,12 +245,12 @@ impl Engine {
     ) {
         let mut workers: Vec<Worker> = vec![];
         let mut clients_map: HashMap<ClientID, WorkerID> = HashMap::new();
-        let mut workers_tx: HashMap<WorkerID, mpsc::Sender<Tx>> = HashMap::new();
+        let mut workers_tx: HashMap<WorkerID, mpsc::UnboundedSender<Tx>> = HashMap::new();
 
         // Spawn workers
         for i in 0..n_workers {
             let worker_id = WorkerID(i);
-            let (trans_tx, trans_rx) = mpsc::channel(10);
+            let (trans_tx, trans_rx) = mpsc::unbounded_channel();
             let account_shard = Arc::new(Mutex::new(HashMap::new()));
             let worker = Worker::run(worker_id, account_shard.clone(), trans_rx).await;
 
@@ -273,7 +273,7 @@ impl Engine {
                 n += 1;
                 worker_id
             });
-            if workers_tx.get(&worker_id).unwrap().send(tx).await.is_err() {
+            if workers_tx.get(&worker_id).unwrap().send(tx).is_err() {
                 error!("Worker {worker_id:?} receiver has been dropped before finishing");
             }
         }
@@ -299,7 +299,11 @@ pub struct Worker {
 
 impl Worker {
     /// Starts a new worker processing in the background.
-    pub async fn run(id: WorkerID, accounts: AccountsShard, trans_rx: mpsc::Receiver<Tx>) -> Self {
+    pub async fn run(
+        id: WorkerID,
+        accounts: AccountsShard,
+        trans_rx: mpsc::UnboundedReceiver<Tx>,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         task::spawn(async move { Self::worker_daemon(id, accounts, trans_rx, shutdown_tx).await });
@@ -321,7 +325,7 @@ impl Worker {
     async fn worker_daemon(
         id: WorkerID,
         accounts: AccountsShard,
-        mut trans_rx: mpsc::Receiver<Tx>,
+        mut trans_rx: mpsc::UnboundedReceiver<Tx>,
         shutdown_tx: oneshot::Sender<()>,
     ) {
         while let Some(tx) = trans_rx.recv().await {

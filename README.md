@@ -46,21 +46,28 @@ $ time cargo run --release -- resources/test/large.csv
 1.86s user 0.62s system 270% cpu 0.920 total
 ```
 
-The transaction engine can process up to `537,634 tx/s`!
+The transaction engine can process more than `1,000,000 tx/s`!
+
+The bad news is that the sequential version performs as fast as the parallel one.
+Increasing the number of workers only decreases the performance of the system.
+My hypothesis is that parsing the CSV is sequential and the engine logic is too simple
+which result in a bottleneck in the parsing side not benefiting from multi-threading.
+We confirmed this hypothesis by adding an artificial delay on the processing of each transaction.
+This time, we saw that increasing the number of workers (parallelism) reduced the total execution time.
 
 ## Versions
 
 This project has been progressively built from simple to complex:
 
 - [Version 0.1](https://github.com/monadplus/toy_atm/tree/v0.1/sequential): single process
-- [Version 0.2](https://github.com/monadplus/toy_atm/tree/v0.2/multithreading): multithreading
+- [Version 0.2](https://github.com/monadplus/toy_atm/tree/v0.2/multithreading): multi-threading
   - This version has a race condition. It can (randomly) be reproduced on the test `engine_test`
-- [Version 1.0 (current)](https://github.com/monadplus/toy_atm): multithreading with master-slaves architecture
+- [Version 1.0 (current)](https://github.com/monadplus/toy_atm): multi-threading with master-slaves architecture
 
 ## Implementation choices
 
 This current implementation includes
-- multithreading with `tokio` using a master-slave architecture,
+- multi-threading with `tokio` using a master-slave architecture,
 - proper error handling through `Result` using [anyhow](https://docs.rs/anyhow/latest/anyhow/) and [thiserror](https://docs.rs/thiserror/latest/thiserror/),
 - logging using `env_logger`,
 - a battery of tests to check the correctness of the code,
