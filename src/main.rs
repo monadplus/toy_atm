@@ -30,18 +30,16 @@ async fn main() -> any::Result<()> {
     }?;
 
     // Start the engine to process asynchronous transactions on the background.
-    let mut engine = Engine::run(4 /*arbitrary*/).await;
+    let engine = Engine::run(4 /*arbitrary*/).await;
 
-    let tx_provider = TxProvider::new();
     // Streamly process all transactions from the CSV
+    let tx_provider = TxProvider::new();
     tx_provider
         .with_csv(&csv_file_path, |trans| engine.send_trans(trans))
         .await?;
 
     // Await until all transactions have been processed
-    engine.finish().await;
-
-    let report = engine.report().await;
+    let report = engine.finish().await;
     print!("{}", report.pretty_csv());
 
     Ok(())
