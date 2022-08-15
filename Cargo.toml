@@ -3,6 +3,7 @@ name = "toy_atm"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.63"
+default-run = "toy_atm"
 
 [dependencies]
 anyhow = "1.0"
@@ -10,6 +11,7 @@ csv = "1.1"
 env_logger = "0.9"
 futures = "0.3"
 log = "0.4"
+rand = "0.8"
 rust_decimal = { version = "1.26", features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"]}
 rust_decimal_macros = "1.26"
 serde = { version = "1.0", features = ["derive"] }
@@ -19,3 +21,8 @@ tokio = { version = "1.20", features = ["full"] }
 [dev-dependencies]
 rusty-hook = "^0.11.2"
 # criterion = "0.3"
+
+[[bin]]
+name = "csv_gen"
+test = false
+bench = false
