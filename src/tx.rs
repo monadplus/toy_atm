@@ -162,3 +162,58 @@ impl TryFrom<RawTx> for Tx {
         }
     }
 }
+
+impl From<Tx> for RawTx {
+    fn from(tx: Tx) -> Self {
+        match tx {
+            Tx::Deposit {
+                client_id,
+                tx_id,
+                amount,
+                ..
+            } => RawTx {
+                ty: "deposit".to_string(),
+                client_id,
+                tx_id,
+                amount: Some(amount),
+            },
+            Tx::Withdrawal {
+                client_id,
+                tx_id,
+                amount,
+            } => RawTx {
+                ty: "withdrawal".to_string(),
+                client_id,
+                tx_id,
+                amount: Some(amount),
+            },
+            Tx::Dispute {
+                client_id,
+                tx_id_reference,
+            } => RawTx {
+                ty: "dispute".to_string(),
+                client_id,
+                tx_id: tx_id_reference,
+                amount: None,
+            },
+            Tx::Resolve {
+                client_id,
+                tx_id_reference,
+            } => RawTx {
+                ty: "resolve".to_string(),
+                client_id,
+                tx_id: tx_id_reference,
+                amount: None,
+            },
+            Tx::Chargeback {
+                client_id,
+                tx_id_reference,
+            } => RawTx {
+                ty: "chargeback".to_string(),
+                client_id,
+                tx_id: tx_id_reference,
+                amount: None,
+            },
+        }
+    }
+}
