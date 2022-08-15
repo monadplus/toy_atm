@@ -1,6 +1,8 @@
-# Toy Transaction Engine
+# Transaction Engine
 
-CLI application that emulates a transaction engine. There are 5 types of transactions:
+CLI application that emulates a transaction engine. 
+
+It includes 5 types of transactions:
 
 * **Deposit**: increases the funds of an account.
 * **Withdrawal**: decreases the funds of an account. Ignored if there are not enough funds in the account.
@@ -11,7 +13,7 @@ CLI application that emulates a transaction engine. There are 5 types of transac
 The app expects a CSV file where each line represent a transaction.
 The format of the input CSV is the following:
 
-```
+```csv
 type,client,tx,amount
 deposit,1,1,200.0
 withdrawal,1,2,200.0
@@ -23,10 +25,19 @@ cargeback,1,1
 The output consist of a CSV list of the state of all the accounts after all transactions have been processed.
 The format is the following:
 
-```
+```csv
 client,available,held,total,locked
 1,100.0,20.0,120.0,false
 ```
+
+## Versions
+
+This project has been progressively built from simple to complex:
+
+- [Version 0.1](https://github.com/monadplus/toy_atm/tree/v0.1/sequential): single process
+- [Version 0.2](https://github.com/monadplus/toy_atm/tree/v0.2/multithreading): multithreading
+  - This version has a race condition. It can (randomly) be reproduced on the test `engine_test`
+- [Version 1.0 (current)](https://github.com/monadplus/toy_atm): multithreading with master-slaves architecture
 
 ## Compile
 
@@ -42,6 +53,9 @@ cargo test --no-run
 
 ```sh
 cargo run -- <file.csv>
+
+# <log_level> = trace/info/warn/error
+RUST_LOG=<log_level> cargo run -- <file.csv>
 ```
 
 ## Execute Tests
@@ -76,10 +90,5 @@ The CSV is processed line by line without loading the whole file into memory.
 
 ## TODOs
 
-- [ ] Change architecture
-  - The broker will have a map of worker <-> List(ClientID).
-  - The broker will forward each tx to the assigned worker.
-  - The Accounts will be sharded by worker to only lock the shard of the worker
-  - Inside each worker, the processing of the transactions will be sequential.
-
+- [ ] Replace `RwLock<HashMap<..>>` for `DashMap`
 - [ ] Profile, benchmark and improve performance
