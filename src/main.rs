@@ -30,7 +30,7 @@ async fn main() -> any::Result<()> {
     }?;
 
     // Start the engine to process asynchronous transactions on the background.
-    let mut engine = Engine::run().await;
+    let mut engine = Engine::run(4 /*arbitrary*/).await;
 
     let tx_provider = TxProvider::new();
     // Streamly process all transactions from the CSV

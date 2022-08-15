@@ -65,7 +65,8 @@ cargo doc --open
 
 ## Implementation choices
 
-This current implementation is sequential and includes:
+This current implementation includes
+- multithreading with `tokio` using a master-slave architecture,
 - proper error handling through `Result` using [anyhow](https://docs.rs/anyhow/latest/anyhow/) and [thiserror](https://docs.rs/thiserror/latest/thiserror/),
 - logging using `env_logger`,
 - a battery of tests to check the correctness of the code,
@@ -73,11 +74,12 @@ This current implementation is sequential and includes:
 
 The CSV is processed line by line without loading the whole file into memory.
 
-The code has already been prepared to be easily adapted to an async implementation.
-For example, the producer and the consumer of the transactions have been split using a channel.
-
 ## TODOs
 
-- [ ] Add concurrency
-  - [ ] Test do not pass because `report()` doesn't wait for all transactions to be processed.
+- [ ] Change architecture
+  - The broker will have a map of worker <-> List(ClientID).
+  - The broker will forward each tx to the assigned worker.
+  - The Accounts will be sharded by worker to only lock the shard of the worker
+  - Inside each worker, the processing of the transactions will be sequential.
+
 - [ ] Profile, benchmark and improve performance

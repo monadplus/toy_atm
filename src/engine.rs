@@ -1,7 +1,10 @@
 //! This module contains the transaction engine.
 
 #![allow(clippy::new_without_default)]
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use crate::{
     report::{AccountSummary, Report},
@@ -12,51 +15,9 @@ use anyhow::anyhow;
 use log::{error, info, trace, warn};
 use rust_decimal::Decimal;
 use tokio::{
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, oneshot, RwLock},
     task,
 };
-
-/* TODO
-accounts: RwLock<ClientID, RwLock<(Account, pending: Vec<Tx>)>>
-pending: RwLock<HashSet<ClientID>
-
-1. Spawn the main daemon:
-  1.1. Read a Tx from the channel
-  1.2. Place the transaction in the pending map
-
-2. Spawn n daemon that:
-  2.1. clientID <- Pop the first pending
-  2.2. RwLock<(account, pending)> <- Retrieves the account(clientID)
-  2.3. account.process_tx(pending)
-
-
-    Example of loop until channel is dropped
-
-    tokio::select! {
-        _ = async {
-            loop {
-                let (socket, _) = listener.accept().await?;
-                tokio::spawn(async move { process(socket) });
-            }
-            Ok::<_, io::Error>(())
-        } => {}
-        _ = rx => {
-            println!("terminating accept loop");
-        }
-    }
-
-    tokio::select! {
-        Some(v) = rx1.recv() => {
-            println!("Got {:?} from rx1", v);
-        }
-        Some(v) = rx2.recv() => {
-            println!("Got {:?} from rx2", v);
-        }
-        else => {
-            println!("Both channels closed");
-        }
-    }
-*/
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
@@ -200,23 +161,52 @@ impl Account {
     }
 }
 
-type Accounts = Arc<Mutex<HashMap<ClientID, Account>>>;
+pub struct AccountState {
+    pub account: RwLock<Account>,
+    pub pending_queue: RwLock<Vec<Tx>>,
+}
+
+impl AccountState {
+    pub fn new() -> Self {
+        Self {
+            account: RwLock::new(Account::new()),
+            pending_queue: RwLock::new(vec![]),
+        }
+    }
+}
+
+// TODO Use dashmap
+type Accounts = Arc<RwLock<HashMap<ClientID, AccountState>>>;
+
+type PendingClients = Arc<RwLock<BTreeSet<ClientID>>>;
 
 /// The transaction engine.
 pub struct Engine {
+    accounts: Accounts,
     trans_tx: Option<mpsc::Sender<Tx>>,
     shut_rx: Option<oneshot::Receiver<()>>,
-    accounts: Accounts,
 }
 
 impl Engine {
-    pub async fn run() -> Engine {
+    pub async fn run(n_workers: u8) -> Engine {
         let (trans_tx, trans_rx) = mpsc::channel(10);
         let (shut_tx, shut_rx) = oneshot::channel();
-        let accounts = Arc::new(Mutex::new(HashMap::new()));
-        let accounts_ptr = Arc::clone(&accounts);
+        let accounts: Accounts = Arc::new(RwLock::new(HashMap::new()));
+        let pending_queue: PendingClients = Arc::new(RwLock::new(BTreeSet::new()));
 
-        task::spawn(async move { engine_logic::main(trans_rx, shut_tx, accounts_ptr).await });
+        // Spawn broker
+        let accounts_ptr = Arc::clone(&accounts);
+        let pending_queue_ptr = Arc::clone(&pending_queue);
+        task::spawn(async move {
+            engine_logic::master_daemon(
+                n_workers,
+                accounts_ptr,
+                pending_queue_ptr,
+                trans_rx,
+                shut_tx,
+            )
+            .await
+        });
 
         Engine {
             accounts,
@@ -247,43 +237,151 @@ impl Engine {
     }
 
     pub async fn report(&self) -> Report {
-        let accounts = {
-            let lock = self.accounts.lock().await;
-            lock.clone() // Cloning to release the lock fast
+        let accounts: HashMap<ClientID, Account> = {
+            // Locking here is fine since the processing has already been finished.
+            let rlock = self.accounts.read().await;
+            let mut accounts_clone = HashMap::new();
+            for (client_id, account_state) in rlock.iter() {
+                let account = account_state.account.read().await.clone();
+                accounts_clone.insert(*client_id, account);
+            }
+            accounts_clone
         };
+
         Report::new(&accounts)
     }
 }
 
 mod engine_logic {
+    use std::time::Duration;
+
+    use futures::future::try_join_all;
+    use tokio::time::sleep;
+
     use super::*;
 
-    pub async fn main(
-        mut rx: mpsc::Receiver<Tx>,
-        shut_tx: oneshot::Sender<()>,
+    pub async fn master_daemon(
+        n_workers: u8,
         accounts: Accounts,
+        pending_queue: PendingClients,
+        mut mailbox: mpsc::Receiver<Tx>,
+        shutdown_tx: oneshot::Sender<()>,
     ) {
-        while let Some(tx) = rx.recv().await {
-            trace!("Processing transaction {tx:?}");
-            let client_id = tx.client_id();
-            let mut accounts_lock = accounts.lock().await;
-            // Careful, holding the lock
-            match accounts_lock.get_mut(&client_id) {
-                None => {
-                    let mut account = Account::new();
-                    account.process_tx(tx);
-                    accounts_lock.insert(client_id, account);
-                    info!("New account created for client {client_id:?}");
-                }
-                Some(account) => {
-                    account.process_tx(tx);
-                }
-            };
+        let mut in_txs: Vec<oneshot::Sender<()>> = vec![];
+        let mut out_rxs: Vec<oneshot::Receiver<()>> = vec![];
+
+        // Spawn workers
+        for _ in 0..n_workers {
+            let (in_tx, in_rx) = oneshot::channel();
+            let (out_tx, out_rx) = oneshot::channel();
+            in_txs.push(in_tx);
+            out_rxs.push(out_rx);
+            let accounts_ptr = Arc::clone(&accounts);
+            let pending_queue_ptr = Arc::clone(&pending_queue);
+            task::spawn(async move {
+                engine_logic::worker_daemon(accounts_ptr, pending_queue_ptr, in_rx, out_tx).await
+            });
         }
 
-        if let Err(_) = shut_tx.send(()) {
+        // Process incoming transactions until the producer is dropped.
+        while let Some(tx) = mailbox.recv().await {
+            trace!("Broker received {tx:?}");
+            let client_id = tx.client_id();
+
+            // 1. Place the transaction in the Account State
+            {
+                let mut wlock = accounts.write().await;
+                match wlock.get_mut(&client_id) {
+                    Some(state) => {
+                        state.pending_queue.write().await.push(tx);
+                    }
+                    None => {
+                        let state = AccountState::new();
+                        state.pending_queue.write().await.push(tx);
+                        wlock.insert(client_id, state);
+                        info!("New account created for client {client_id:?}");
+                    }
+                }
+            }
+
+            // 2. Place the transaction in the pending queue
+            {
+                let mut wlock = pending_queue.write().await;
+                wlock.insert(client_id);
+            }
+        }
+
+        // Wait for all workers to finish
+        for tx in in_txs.into_iter() {
+            if let Err(_) = tx.send(()) {
+                error!("Sender stop signal for worker failed")
+            }
+        }
+        if let Err(_) = try_join_all(out_rxs).await {
+            error!("Receiver shutdown for worker failed")
+        }
+
+        // Send shutdown signal
+        if let Err(_) = shutdown_tx.send(()) {
             error!("shut_rx dropped before sending the stop signal")
         };
+    }
+
+    /// Background task that:
+    /// - Picks a client with pending transactions to process
+    /// - and processes all transactions from that client
+    pub async fn worker_daemon(
+        accounts: Accounts,
+        pending_clients: PendingClients,
+        stop_signal_rx: oneshot::Receiver<()>,
+        shutdown_tx: oneshot::Sender<()>,
+    ) {
+        tokio::pin!(stop_signal_rx);
+        loop {
+            tokio::select! {
+                mut p = pending_clients.write() => {
+                  let head = p.pop_first();
+                  drop(p);
+                  match head {
+                      None => {
+                          // Don't waste CPU
+                          sleep(Duration::from_millis(100)).await;
+                      }
+                      Some(client_id) => {
+                          // TODO: is it possible to get a reference to an element
+                          // of the hashmap after releasing the lock ?
+                          let accounts_rlock = accounts.read().await;
+                          let state = accounts_rlock.get(&client_id);
+                          match state {
+                              None => warn!("Retrieving state for {:?} not found", client_id),
+                              Some(state) => {
+                                  // Race condition:
+                                  //
+                                  // We want to keep both pending_queue and accounts locked
+                                  // to prevent another worker from picking the account before us.
+                                  //
+                                  // TODO Arnau: avoid locking
+                                  let mut pending_lock = state.pending_queue.write().await;
+                                  let mut account_lock = state.account.write().await;
+                                  let transs: Vec<Tx> = pending_lock.drain(..).collect();
+                                  for trans in transs {
+                                      account_lock.process_tx(trans);
+                                  }
+                              }
+                          }
+                      }
+                  }
+                }
+
+                _ = &mut stop_signal_rx => {
+                    info!("Stop signal received");
+                    break;
+                }
+            }
+        }
+        if let Err(_) = shutdown_tx.send(()) {
+            error!("Worker shutdown receiver dropped before a message was sent");
+        }
     }
 }
 
@@ -544,7 +642,7 @@ mod tests {
         // Uncomment for debugging:
         // env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
 
-        let mut engine = Engine::run().await;
+        let mut engine = Engine::run(2).await;
         // Client 1
         engine.send_trans(tx!(+,1,1,100)).await.unwrap();
         engine.send_trans(tx!(+,1,2,50)).await.unwrap();
