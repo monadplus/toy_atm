@@ -49,11 +49,31 @@ $ time cargo run --release -- resources/test/large.csv
 The transaction engine can process more than `1,000,000 tx/s`!
 
 The bad news is that the sequential version performs as fast as the parallel one.
-Increasing the number of workers only decreases the performance of the system.
-My hypothesis is that parsing the CSV is sequential and the engine logic is too simple
-which result in a bottleneck in the parsing side not benefiting from multi-threading.
-We confirmed this hypothesis by adding an artificial delay on the processing of each transaction.
-This time, we saw that increasing the number of workers (parallelism) reduced the total execution time.
+
+My hypothesis is that the bottleneck is the parsing because it is done sequentially 
+and the engine logic is so simple that can be done faster that CSV processing.
+
+We confirmed this hypothesis by adding an artificial delay (100ms) on the processing of each transaction.
+We generated a smaller CSV (1000 lines) and run several runs on different numbers of workers.
+
+```bash
+# 1 worker
+cargo run --release -- large.csv  0.12s user 0.05s system 0% cpu 1:41.23 total
+
+# 2 workers
+cargo run --release -- large.csv  0.10s user 0.05s system 0% cpu 51.541 total
+
+# 4 workers
+cargo run --release -- large.csv  0.11s user 0.02s system 0% cpu 30.006 total
+
+# 8 workers
+cargo run --release -- large.csv  0.08s user 0.02s system 0% cpu 19.375 total
+
+# 16 workers
+cargo run --release -- large.csv  0.07s user 0.02s system 0% cpu 11.184 total
+```
+
+We peaked at 16 workers with a 10x speed up.
 
 ## Versions
 
