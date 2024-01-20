@@ -9,9 +9,13 @@ codegen-units = 1
 lto = "fat"
 panic = "abort"
 
+# Profiling (perf + flamegraph)
+# debug = true
+
 [dependencies]
 anyhow = "1.0"
 csv = "1.1"
+dashmap = "5.5.3"
 env_logger = "0.9"
 futures = "0.3"
 log = "0.4"

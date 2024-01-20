@@ -140,7 +140,7 @@ fn main() -> any::Result<()> {
         Some(str) => Ok(str.parse()?),
     }?;
 
-    let mut csv_writer = csv::Writer::from_path(&csv_path)?;
+    let mut csv_writer = csv::Writer::from_path(csv_path)?;
     let mut tx_gen = TxGen::new();
     for _ in 0..n_rows {
         csv_writer.serialize(RawTx::from(tx_gen.arbitrary()))?;

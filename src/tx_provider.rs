@@ -7,13 +7,12 @@
 use any::Context;
 use anyhow as any;
 use anyhow::anyhow;
-use csv::Trim;
-use log::info;
+use rust_decimal::Decimal;
 use std::fmt::Debug;
 use std::future::Future;
 use std::path::Path;
 
-use crate::tx::Tx;
+use crate::tx::{ClientID, Tx, TxID};
 
 pub struct TxProvider;
 
@@ -30,15 +29,55 @@ impl TxProvider {
         F: Fn(Tx) -> Fut,
         Fut: Future<Output = any::Result<()>>,
     {
-        let mut csv_reader = csv::ReaderBuilder::new()
-            .trim(Trim::All)
-            .flexible(true)
-            .from_path(&path)
-            .context(format!("CSV reader failed to read {:?}", &path))?;
-        info!("CSV reader initialized for path {:?}", &path);
+        use std::io::BufRead;
 
-        for row in csv_reader.deserialize() {
-            let trans: Tx = row?;
+        let file = std::fs::File::open(path)?;
+        let mut lines = std::io::BufReader::new(file).lines();
+        lines.next(); // header: type,client,tx,amount
+        for line in lines {
+            let line: String = line?;
+            let mut iter = line.split(',');
+            let ty = iter.next().context("Missing `type` column")?;
+            let client_id: ClientID = {
+                let str = iter.next().context("Missing `client` column")?;
+                ClientID(str.trim().parse::<u16>()?)
+            };
+            let tx_id: TxID = {
+                let str = iter.next().context("Missing `tx` column")?;
+                TxID(str.trim().parse::<u32>()?)
+            };
+            let amount = iter
+                .next()
+                .filter(|str| !str.is_empty())
+                .map(|str| str.trim().parse::<Decimal>())
+                .transpose()?;
+            let trans: Tx = match ty.trim() {
+                "deposit" => Tx::Deposit {
+                    client_id,
+                    tx_id,
+                    amount: amount.context("Deposit missing `amount` column")?,
+                    in_dispute: false,
+                },
+                "withdrawal" => Tx::Withdrawal {
+                    client_id,
+                    tx_id,
+                    amount: amount.context("Withdrawal missing `amount` column")?,
+                },
+                "dispute" => Tx::Dispute {
+                    client_id,
+                    tx_id_reference: tx_id,
+                },
+                "resolve" => Tx::Resolve {
+                    client_id,
+                    tx_id_reference: tx_id,
+                },
+                "chargeback" => Tx::Chargeback {
+                    client_id,
+                    tx_id_reference: tx_id,
+                },
+                ty => anyhow::bail!("Not expected type {}", ty),
+            };
+
             process_tx(trans).await?;
         }
 

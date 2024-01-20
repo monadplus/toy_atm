@@ -30,7 +30,7 @@ async fn main() -> any::Result<()> {
     }?;
 
     // Start the engine to process asynchronous transactions on the background.
-    let engine = Engine::run(2 /*Best param for 8 cores*/).await;
+    let engine = Engine::run(16).await;
 
     // Streamly process all transactions from the CSV
     let tx_provider = TxProvider::new();
