@@ -135,4 +135,3 @@ cargo doc --open
 ## TODOs
 
 - [ ] Replace `RwLock<HashMap<..>>` for `DashMap`
-- [ ] Profile, benchmark and improve performance
