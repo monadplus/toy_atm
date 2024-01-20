@@ -7,13 +7,13 @@ use crate::{
 };
 use anyhow as any;
 use anyhow::anyhow;
+use dashmap::DashMap;
 use futures::future::join_all;
 use log::{error, info, trace, warn};
 use rust_decimal::Decimal;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
 use tokio::{
-    sync::{mpsc, oneshot, RwLock},
+    sync::{mpsc, oneshot},
     task,
 };
 
@@ -159,15 +159,11 @@ impl Account {
     }
 }
 
-// TODO
-// We pay a little overhead using a sync primitive when we only need
-// access to an exclusive reference, but `Cell` cannot be used because
-// it is not `Send` (although we know it is safe to be sent to another thread)
+// TODO: we pay a little overhead using a sync primitive when we only need
+// access to an exclusive reference, but `Cell` cannot be used because it is not `Send`.
+type Accounts = Arc<DashMap<WorkerID, AccountsShard>>;
 
-type Accounts = Arc<RwLock<HashMap<WorkerID, AccountsShard>>>;
-
-// TODO Use https://docs.rs/dashmap/5.3.4/dashmap/ instead of Mutex<HashMap<..>>
-type AccountsShard = Arc<Mutex<HashMap<ClientID, Account>>>;
+type AccountsShard = Arc<DashMap<ClientID, Account>>;
 
 /// The transaction engine.
 pub struct Engine {
@@ -180,7 +176,7 @@ impl Engine {
     pub async fn run(n_workers: u8) -> Engine {
         let (trans_tx, trans_rx) = mpsc::channel(1000);
         let (shut_tx, shut_rx) = oneshot::channel();
-        let accounts: Accounts = Arc::new(RwLock::new(HashMap::new()));
+        let accounts: Accounts = Arc::new(DashMap::with_capacity(n_workers as usize));
 
         // Spawn master
         // Master will spawn workers
@@ -223,12 +219,9 @@ impl Engine {
     async fn report(&self) -> Report {
         let accounts: HashMap<ClientID, Account> = {
             let mut accounts = HashMap::new();
-            // Locking here is fine since the processing has already been finished.
-            let accounts_rlock = self.accounts.read().await;
-            for (_worker_id, shard) in accounts_rlock.iter() {
-                let shard_lock = shard.lock().await;
-                for (client_id, account) in shard_lock.iter() {
-                    accounts.insert(*client_id, account.clone());
+            for pair in self.accounts.iter() {
+                for pair in pair.value().iter() {
+                    accounts.insert(*pair.key(), pair.value().clone());
                 }
             }
             accounts
@@ -251,11 +244,11 @@ impl Engine {
         for i in 0..n_workers {
             let worker_id = WorkerID(i);
             let (trans_tx, trans_rx) = mpsc::unbounded_channel();
-            let account_shard = Arc::new(Mutex::new(HashMap::new()));
+            let account_shard = Arc::new(DashMap::new());
             let worker = Worker::run(worker_id, account_shard.clone(), trans_rx).await;
 
             // Create the shard
-            accounts.write().await.insert(worker_id, account_shard);
+            accounts.insert(worker_id, account_shard);
             // Fill auxiliary data structures
             workers_tx.insert(worker_id, trans_tx);
             workers.push(worker);
@@ -330,16 +323,13 @@ impl Worker {
     ) {
         while let Some(tx) = trans_rx.recv().await {
             let client_id = tx.client_id();
-            // This is locking the mutex for a long time but it is totally OK because
-            // we are the only ones accessing it.
-            let mut accounts_lock = accounts.lock().await;
-            match accounts_lock.get_mut(&client_id) {
+            match accounts.get_mut(&client_id) {
                 None => {
                     let mut account = Account::new();
                     account.process_tx(tx);
-                    accounts_lock.insert(client_id, account);
+                    accounts.insert(client_id, account);
                 }
-                Some(account) => {
+                Some(mut account) => {
                     account.process_tx(tx);
                 }
             }

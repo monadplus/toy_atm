@@ -29,6 +29,9 @@ $ perf report --symbol-filter closure
 2. Replace csv::ReaderBuilder by manual parsing
     - Before: 464.1 ms ±   8.2 ms
     - After: 321.9 ms ±  15.1 ms
-3. Mutex<HashMap> by DashMap
+3. Replace tokio::Mutex,RwLock by parking_lot (reverted)
     - Before: 321.9 ms ±  15.1 ms
-    - After:
+    - After: 317.9 ms ±  19.9 ms
+4. Mutex<HashMap> by DashMap
+    - Before: 321.9 ms ±  15.1 ms
+    - After: 322.0 ms ±   9.8 ms

@@ -131,7 +131,3 @@ cargo test
 ```sh
 cargo doc --open
 ```
-
-## TODOs
-
-- [ ] Replace `RwLock<HashMap<..>>` for `DashMap`
